@@ -11,7 +11,11 @@ import {HashToCurveG1} from "../../src/bls/HashToCurveG1.sol";
 
 /// @dev Exposes library internals for vector tests. Test-only.
 contract BlsHarness {
-    function expandMessageXmd(bytes calldata msg_, bytes calldata dst, uint256 len) external view returns (bytes memory) {
+    function expandMessageXmd(bytes calldata msg_, bytes calldata dst, uint256 len)
+        external
+        view
+        returns (bytes memory)
+    {
         return HashToCurveG1.expandMessageXmd(msg_, dst, len);
     }
 
@@ -58,7 +62,7 @@ contract MockEpochAuthority is IEpochAuthority {
     }
 }
 
-contract BeaconVerifierTest is Test {
+abstract contract BeaconVerifierFixture is Test {
     string internal json;
     BeaconVerifier internal verifier;
     BlsHarness internal harness;
@@ -80,7 +84,7 @@ contract BeaconVerifierTest is Test {
 
     RoundVec[] internal rounds;
 
-    function setUp() public {
+    function setUp() public virtual {
         json = vm.readFile("test/vectors/bls12.json");
         networkId = vm.parseJsonBytes32(json, ".network.networkId");
         genesisTime = uint64(vm.parseJsonUint(json, ".network.genesisTime"));
@@ -136,7 +140,9 @@ contract BeaconVerifierTest is Test {
     function _isAvailable(uint64 round) internal view returns (bool a) {
         (a,) = verifier.get(round);
     }
+}
 
+contract BeaconVerifierTest is BeaconVerifierFixture {
     // ------------------------------------------------------------------ §10.3 required tests
 
     function test_Rfc9380Vectors() public view {
@@ -191,7 +197,9 @@ contract BeaconVerifierTest is Test {
         // Deterministic threshold fixture: partials verify under their public shares, every
         // t-subset reconstructs the same group signature on-chain (G1MSM), and it verifies.
         uint64 thRound = uint64(vm.parseJsonUint(json, ".threshold.round"));
-        bytes memory hm = harness.hashToG1(vm.parseJsonBytes(json, ".threshold.message"), bytes(vm.parseJsonString(json, ".network.dst")));
+        bytes memory hm = harness.hashToG1(
+            vm.parseJsonBytes(json, ".threshold.message"), bytes(vm.parseJsonString(json, ".network.dst"))
+        );
         assertEq(hm, _affineToEip(vm.parseJsonBytes(json, ".threshold.hashToCurveAffine")), "H(M)");
         uint256 n = vm.parseJsonUint(json, ".threshold.n");
         bytes[] memory partialEip = new bytes[](n);
@@ -268,7 +276,9 @@ contract BeaconVerifierTest is Test {
         vm.expectRevert(BLS12381.InvalidGroupKey.selector);
         new BeaconVerifier(networkId, genesisTime, _keyFrom(".negative.groupKeyNonSubgroupWords"), address(authority));
         vm.expectRevert(BLS12381.InvalidGroupKey.selector);
-        new BeaconVerifier(networkId, genesisTime, _keyFrom(".negative.groupKeyWrongCoefficientOrderWords"), address(authority));
+        new BeaconVerifier(
+            networkId, genesisTime, _keyFrom(".negative.groupKeyWrongCoefficientOrderWords"), address(authority)
+        );
     }
 
     function test_RejectNonCanonicalField() public {
@@ -329,7 +339,9 @@ contract BeaconVerifierTest is Test {
         vm.expectRevert(abi.encodeWithSelector(BeaconVerifier.InvalidRound.selector, maxRound + 1));
         verifier.roundTime(maxRound + 1);
         assertEq(verifier.roundTime(maxRound), genesisTime + 30 * (maxRound - 1));
-        assertGt(uint256(verifier.roundTime(maxRound)) + 30, uint256(type(uint64).max), "T(maxRound + 1) overflows uint64");
+        assertGt(
+            uint256(verifier.roundTime(maxRound)) + 30, uint256(type(uint64).max), "T(maxRound + 1) overflows uint64"
+        );
 
         // epoch gate: an unauthorized epoch cannot publish, but the pure check still verifies
         RoundVec memory r5761 = _vec(5761); // epoch 2, never authorized by the mock
@@ -347,7 +359,9 @@ contract BeaconVerifierTest is Test {
         // early submission reverts exactly until T(r)
         RoundVec memory r2881 = _vec(2881);
         vm.warp(verifier.roundTime(2881) - 1);
-        vm.expectRevert(abi.encodeWithSelector(BeaconVerifier.RoundNotReleased.selector, 2881, verifier.roundTime(2881)));
+        vm.expectRevert(
+            abi.encodeWithSelector(BeaconVerifier.RoundNotReleased.selector, 2881, verifier.roundTime(2881))
+        );
         verifier.submit(2881, r2881.affine);
         vm.warp(verifier.roundTime(2881));
         assertTrue(verifier.submit(2881, r2881.affine));
@@ -382,7 +396,8 @@ contract BeaconVerifierTest is Test {
         verifier.verify(1, r1.affine);
         vm.clearMockedCalls();
         // genesis fails on every missing precompile it depends on
-        address[6] memory genesisUsed = [address(0x02), address(0x05), address(0x0b), address(0x0e), address(0x0f), address(0x10)];
+        address[6] memory genesisUsed =
+            [address(0x02), address(0x05), address(0x0b), address(0x0e), address(0x0f), address(0x10)];
         for (uint256 i = 0; i < genesisUsed.length; i++) {
             vm.mockCall(genesisUsed[i], bytes(""), bytes(""));
             vm.expectRevert();
@@ -438,19 +453,30 @@ contract BeaconVerifierTest is Test {
         (bool a0, bytes32 v0) = verifier.get(42);
         assertFalse(a0);
         assertEq(v0, bytes32(0));
-        // Mock (allowed only here): force a stored value of zero and check availability is explicit.
+        // Mock only the final SHA256(compressed signature) call (allowed for this value-path
+        // case). The real parser, hash-to-curve and pairing still run. This exercises an actual
+        // first write of zero, rather than editing the value slot after storing a nonzero value.
         RoundVec memory v = _vec(42);
+        vm.mockCall(address(0x02), v.compressed, abi.encode(bytes32(0)));
+        assertEq(verifier.verify(42, v.affine), bytes32(0));
+        vm.expectEmit(true, true, true, true, address(verifier));
+        emit IBeacon.RoundVerified(networkId, 0, 42, bytes32(0), v.compressed);
         assertTrue(verifier.submit(42, v.affine));
-        bytes32 valueSlot = keccak256(abi.encode(uint256(42), uint256(0))); // _values is slot 0
-        assertEq(vm.load(address(verifier), valueSlot), v.value, "slot layout");
-        vm.store(address(verifier), valueSlot, bytes32(0));
         (bool a1, bytes32 v1) = verifier.get(42);
         assertTrue(a1, "all-zero R is available");
         assertEq(v1, bytes32(0));
+        vm.recordLogs();
+        assertFalse(verifier.submit(42, v.affine), "a zero-valued round must still be a duplicate");
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertFalse(_isAvailable(41));
+        assertFalse(_isAvailable(43));
+        vm.clearMockedCalls();
     }
 
     /// forge-config: default.fuzz.runs = 10000
-    function testFuzz_EncodingCannotChangeOutput(uint8 roundIdx, uint8 pos, uint8 mask, uint8 mode, uint8 extra) public {
+    function testFuzz_EncodingCannotChangeOutput(uint8 roundIdx, uint8 pos, uint8 mask, uint8 mode, uint8 extra)
+        public
+    {
         RoundVec memory v = rounds[roundIdx % rounds.length];
         mode = mode % 4;
         if (mode == 0) {
@@ -482,7 +508,9 @@ contract BeaconVerifierTest is Test {
     }
 
     /// forge-config: default.fuzz.runs = 2000
-    function testFuzz_ModifiedSignatureFails(uint8 roundIdx, uint256 delta, bool onY, uint64 roundShift, uint8 mode) public {
+    function testFuzz_ModifiedSignatureFails(uint8 roundIdx, uint256 delta, bool onY, uint64 roundShift, uint8 mode)
+        public
+    {
         RoundVec memory v = rounds[roundIdx % rounds.length];
         mode = mode % 4;
         if (mode == 0) {
@@ -503,8 +531,8 @@ contract BeaconVerifierTest is Test {
             verifier.verify(v.round, m);
         } else if (mode == 1) {
             // modified message: another round, including other epochs
-            uint64 other = uint64(bound(roundShift, 1, maxRound));
-            vm.assume(other != v.round);
+            uint64 other = uint64(bound(roundShift, 1, maxRound - 1));
+            if (other >= v.round) other++;
             vm.expectRevert(BeaconVerifier.InvalidSignature.selector);
             verifier.verify(other, v.affine);
         } else if (mode == 2) {

@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: pyblst
+Version: 0.3.15
+Classifier: Programming Language :: Rust
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: 3.14
+License-File: LICENSE.txt
+Summary: Python bindings for blst
+Keywords: blst,zero-knowledge,zkp,proof,python,rust,cardano,smart contract,blockchain
+Author: Niels Mündler
+Author-email: n.muendler@posteo.de
+Maintainer-email: Niels Mündler <n.muendler@posteo.de>
+Requires-Python: >=3.9
