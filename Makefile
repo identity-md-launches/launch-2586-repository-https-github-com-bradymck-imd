@@ -3,7 +3,7 @@
 
 FORGE ?= forge
 # The seed IMD's verifier uses for this job's fuzz tests; override with FUZZ_SEED=0x...
-FUZZ_SEED ?= 0x4c3111c9d3cbce64ad39b508ac8cae717b41638c104f0bc6799e8fe01c04de0a
+FUZZ_SEED ?= 0x21a72a54ac22fd21b2fa321a6c0150026794b2a2d1dbbd5357facdd14b61c6ad
 
 export FOUNDRY_OFFLINE = true
 

@@ -39,16 +39,6 @@ contract BlsBoundaryHarness is BlsHarness {
 ///         No successful verification uses mocked cryptography. Precompile mocks below inject
 ///         faults only; they cannot make an invalid signature pass a positive test.
 contract BeaconVerifierAdversarialTest is BeaconVerifierFixture {
-    function _assertUnset(uint64 round) internal view {
-        (bool available, bytes32 value) = verifier.get(round);
-        assertFalse(available, "failed call made round available");
-        assertEq(value, bytes32(0), "failed call left randomness behind");
-    }
-
-    function _failure(address target) internal pure returns (bytes memory) {
-        return abi.encodeWithSelector(BLS12381.PrecompileFailure.selector, target);
-    }
-
     function test_FirstPublicationIsPermissionlessAndVerifyHasNoWrites() public {
         RoundVec memory v = _vec(17);
         address relayer = makeAddr("NON_PRODUCTION_RELAYER");
@@ -113,10 +103,21 @@ contract BeaconVerifierAdversarialTest is BeaconVerifierFixture {
             vm.parseJsonBytes(json, ".negative.otherNetworkRound1.signatureAffine"),
             vm.parseJsonBytes(json, ".negative.wrongEpochRound1.signatureAffine")
         ];
+        bytes[9] memory expected = [
+            abi.encodeWithSelector(BLS12381.InfinityPoint.selector),
+            _failure(address(0x0f)),
+            _failure(address(0x0f)),
+            abi.encodeWithSelector(BLS12381.NonCanonicalFieldElement.selector),
+            abi.encodeWithSelector(BLS12381.NonCanonicalFieldElement.selector),
+            abi.encodeWithSelector(BeaconVerifier.InvalidSignature.selector),
+            abi.encodeWithSelector(BeaconVerifier.InvalidSignature.selector),
+            abi.encodeWithSelector(BeaconVerifier.InvalidSignature.selector),
+            abi.encodeWithSelector(BeaconVerifier.InvalidSignature.selector)
+        ];
         for (uint256 i; i < invalid.length; ++i) {
             vm.record();
             vm.recordLogs();
-            vm.expectRevert();
+            vm.expectRevert(expected[i]);
             verifier.submit(1, invalid[i]);
             (, bytes32[] memory writes) = vm.accesses(address(verifier));
             assertEq(writes.length, 0, "invalid input reached SSTORE");
@@ -162,16 +163,18 @@ contract BeaconVerifierAdversarialTest is BeaconVerifierFixture {
     function test_MalformedAuthorityReturnCannotAuthorizeAnEpoch() public {
         RoundVec memory v = _vec(2881);
         bytes memory gateCall = abi.encodeCall(IEpochAuthority.isEpochAuthorized, (networkId, uint64(1)));
+        // Return data shorter than one ABI word, or a word that is not 0/1 for a bool, is rejected by
+        // the caller's ABI decoder with empty revert data (no selector exists for this case).
         uint256[3] memory lengths = [uint256(0), 1, 31];
         for (uint256 i; i < lengths.length; ++i) {
             vm.mockCall(address(authority), gateCall, new bytes(lengths[i]));
-            vm.expectRevert();
+            vm.expectRevert(bytes(""));
             verifier.submit(v.round, v.affine);
             _assertUnset(v.round);
             vm.clearMockedCalls();
         }
         vm.mockCall(address(authority), gateCall, abi.encode(uint256(2))); // invalid ABI bool
-        vm.expectRevert();
+        vm.expectRevert(bytes(""));
         verifier.submit(v.round, v.affine);
         _assertUnset(v.round);
         vm.clearMockedCalls();
@@ -186,8 +189,9 @@ contract BeaconVerifierAdversarialTest is BeaconVerifierFixture {
         assertTrue(available);
         assertEq(value, v.value);
         assertEq(verifier.verify(v.round, v.affine), v.value);
-        // A not-yet-published round still fails closed; a broken mirror cannot replace the key.
-        vm.expectRevert();
+        // A not-yet-published round still fails closed with the authority's own revert data;
+        // a broken mirror cannot replace the key.
+        vm.expectRevert(abi.encodeWithSignature("Unavailable()"));
         verifier.submit(5760, _vec(5760).affine);
         _assertUnset(5760);
         vm.clearMockedCalls();
@@ -386,18 +390,19 @@ contract BeaconVerifierAdversarialTest is BeaconVerifierFixture {
         address[6] memory targets = [address(2), address(5), address(0x0b), address(0x0e), address(0x0f), address(0x10)];
         uint256[6] memory sizes = [uint256(32), 48, 128, 256, 32, 128];
         for (uint256 i; i < targets.length; ++i) {
+            bytes memory expected = targets[i] == address(0x0e)
+                ? abi.encodeWithSelector(BLS12381.InvalidGroupKey.selector)
+                : _failure(targets[i]);
             for (uint256 delta; delta < 2; ++delta) {
                 uint256 length = delta == 0 ? sizes[i] - 1 : sizes[i] + 1;
                 vm.mockCall(targets[i], bytes(""), new bytes(length));
-                bytes memory expected = targets[i] == address(0x0e)
-                    ? abi.encodeWithSelector(BLS12381.InvalidGroupKey.selector)
-                    : _failure(targets[i]);
                 vm.expectRevert(expected);
                 new BeaconVerifier(networkId, genesisTime, key, address(authority));
                 vm.clearMockedCalls();
             }
+            // a reverting precompile is reported the same way; its revert data is never bubbled
             vm.mockCallRevert(targets[i], bytes(""), hex"aabbccdd");
-            vm.expectRevert();
+            vm.expectRevert(expected);
             new BeaconVerifier(networkId, genesisTime, key, address(authority));
             vm.clearMockedCalls();
         }

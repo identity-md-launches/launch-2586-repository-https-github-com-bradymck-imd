@@ -88,7 +88,8 @@ contract BeaconVerifier is IBeacon {
         epochAuthority = epochAuthority_;
         maxRound = uint64((type(uint64).max - genesisTime_) / PERIOD + 1);
 
-        bytes memory pk = abi.encodePacked(key.xc0Hi, key.xc0Lo, key.xc1Hi, key.xc1Lo, key.yc0Hi, key.yc0Lo, key.yc1Hi, key.yc1Lo);
+        bytes memory pk =
+            abi.encodePacked(key.xc0Hi, key.xc0Lo, key.xc1Hi, key.xc1Lo, key.yc0Hi, key.yc0Lo, key.yc1Hi, key.yc1Lo);
         BLS12381.validateGroupKey(pk); // canonical, non-infinity, on twist, subgroup (G2MSM)
         _pk0 = key.xc0Hi;
         _pk1 = key.xc0Lo;
@@ -128,10 +129,14 @@ contract BeaconVerifier is IBeacon {
 
         (uint256 word, uint256 bit) = _slot(round);
         if (_available[word] & bit != 0) {
-            // Already available. The signature on (PK, M) is unique, so a matching submission is
-            // exactly the stored one: compare its canonical hash and never write or emit again.
-            bytes memory sigEip = BLS12381.parseAffineG1(affineG1Signature);
-            bytes32 resubmitted = BLS12381.sha256Strict(BLS12381.compressG1(sigEip));
+            // Already available. A resubmission gets the full verification (encoding checks,
+            // hash-to-curve, pairing): an invalid input reverts with the same error a first
+            // submission gets, whether or not its compressed form matches the stored preimage
+            // (audit round 2, finding 1: a point with the signature's x and sign bit but another y
+            // has the same hash while being off the curve). The signature on (PK, M) is unique, so
+            // a verified duplicate is the stored one; the comparison is kept as a final check.
+            // Nothing is written or emitted, so a duplicate can never be paid.
+            (bytes32 resubmitted,) = _verify(round, affineG1Signature);
             if (resubmitted != _values[round]) revert RoundValueMismatch(round);
             return false;
         }

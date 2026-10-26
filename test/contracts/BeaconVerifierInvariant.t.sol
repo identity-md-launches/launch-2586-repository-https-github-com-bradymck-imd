@@ -6,6 +6,7 @@ import {Vm} from "../forge-std/src/Vm.sol";
 import {BeaconVerifierFixture, MockEpochAuthority} from "./BeaconVerifier.t.sol";
 import {BeaconVerifier} from "../../src/BeaconVerifier.sol";
 import {IBeacon} from "../../src/interfaces/IBeacon.sol";
+import {BLS12381} from "../../src/bls/BLS12381.sol";
 
 /// @dev All actors and fixtures are NON-PRODUCTION. Only the test authority is mutable.
 ///      The model keeps its own publication history and uses release times/epochs from
@@ -127,20 +128,48 @@ contract BeaconRoundHandler is Test {
         ++verifyCalls;
     }
 
+    /// @dev Every malformed or wrong input must revert with the exact data its state implies: an
+    ///      unreleased round reports RoundNotReleased, an unpublished round of an unauthorized epoch
+    ///      reports EpochNotAuthorized, and otherwise, published or not, the signature check's own
+    ///      error. Accepting any revert would let the release or epoch gates mask a missed check.
     function rejectMalformedOrWrongSignature(uint256 sampleSeed, uint8 mutationSeed) public {
         uint256 i = bound(sampleSeed, 0, samples.length - 1);
         BeaconVerifierFixture.RoundVec memory sample = samples[i];
         bytes memory invalid = sample.affine;
-        uint256 mutation = mutationSeed % 4;
-        if (mutation == 0) invalid = bytes.concat(invalid, hex"00");
-        else if (mutation == 1) invalid = new bytes(96); // infinity
-        else if (mutation == 2) invalid[0] = bytes1(uint8(invalid[0]) | 0x80); // compressed flag in affine x
-        else invalid[47] = bytes1(uint8(invalid[47]) ^ 1); // change x, hence also the compressed preimage
-        // Same-x/same-sign off-curve duplicate inputs have a separate confirmed finding.
-        // The failing proof is in .imd-findings.json; acceptance is never asserted here.
+        bytes memory signatureError;
+        uint256 mutation = mutationSeed % 5;
+        if (mutation == 0) {
+            invalid = bytes.concat(invalid, hex"00");
+            signatureError = abi.encodeWithSelector(BLS12381.InvalidSignatureLength.selector, 97);
+        } else if (mutation == 1) {
+            invalid = new bytes(96); // infinity
+            signatureError = abi.encodeWithSelector(BLS12381.InfinityPoint.selector);
+        } else if (mutation == 2) {
+            invalid[0] = bytes1(uint8(invalid[0]) | 0x80); // compressed flag in affine x
+            signatureError = abi.encodeWithSelector(BLS12381.NonCanonicalFieldElement.selector);
+        } else if (mutation == 3) {
+            invalid[47] = bytes1(uint8(invalid[47]) ^ 1); // change x, hence also the compressed preimage
+            signatureError = abi.encodeWithSelector(BLS12381.PrecompileFailure.selector, address(0x0f));
+        } else {
+            // change y, keeping x and the sign bit: the compressed preimage of the stored value is
+            // unchanged, so only a real curve check can reject this (audit round 2, finding 1)
+            invalid[95] = bytes1(uint8(invalid[95]) ^ 1);
+            signatureError = abi.encodeWithSelector(BLS12381.PrecompileFailure.selector, address(0x0f));
+        }
+        bool released = block.timestamp >= releaseTimes[i];
+        bool allowed = epochAuthorized[sample.epoch];
+        bytes memory expected;
+        if (!released) {
+            expected = abi.encodeWithSelector(BeaconVerifier.RoundNotReleased.selector, sample.round, releaseTimes[i]);
+        } else if (!published[sample.round] && !allowed) {
+            expected = abi.encodeWithSelector(BeaconVerifier.EpochNotAuthorized.selector, sample.epoch);
+        } else {
+            expected = signatureError;
+        }
         vm.recordLogs();
-        (bool ok,) = address(beacon).call(abi.encodeCall(IBeacon.submit, (sample.round, invalid)));
+        (bool ok, bytes memory result) = address(beacon).call(abi.encodeCall(IBeacon.submit, (sample.round, invalid)));
         assertFalse(ok, "invalid input published or matched an existing round");
+        assertEq(result, expected, "invalid input reverted with unexpected data");
         assertEq(vm.getRecordedLogs().length, 0);
         ++rejectedCalls;
     }
@@ -267,21 +296,25 @@ contract BeaconVerifierInvariantTest is BeaconVerifierFixture {
         handler.advanceToReleaseBoundary(0, 1); // exactly genesis
         handler.publish(0, 0);
         handler.publish(0, 2); // competing relayer cannot earn another first-write indication
-        handler.rejectMalformedOrWrongSignature(0, 0);
+        handler.rejectMalformedOrWrongSignature(0, 0); // published round: every mutation hits the check
         handler.rejectMalformedOrWrongSignature(0, 1);
         handler.rejectMalformedOrWrongSignature(0, 2);
         handler.rejectMalformedOrWrongSignature(0, 3);
+        handler.rejectMalformedOrWrongSignature(0, 4); // y changed, x and sign bit kept (finding 1)
+        handler.rejectMalformedOrWrongSignature(10, 4); // round 5761 unreleased: RoundNotReleased
         handler.advanceToReleaseBoundary(10, 1); // round 5761, epoch 2
         handler.authorizeWrongNetwork(10);
+        handler.rejectMalformedOrWrongSignature(10, 4); // released, epoch 2 unauthorized: EpochNotAuthorized
         handler.publish(10, 1); // correct signature but unauthorized destination epoch
         handler.authorizeEpoch(10);
+        handler.rejectMalformedOrWrongSignature(10, 4); // authorized, unpublished: the signature check
         handler.publish(10, 1);
         handler.verifyWithoutPublishing(10, 2);
         handler.assertModel();
         assertEq(handler.firstWrites(), 2);
         assertEq(handler.publicationEvents(), 2);
         assertEq(handler.duplicateCalls(), 1);
-        assertEq(handler.rejectedCalls(), 6);
+        assertEq(handler.rejectedCalls(), 10);
         assertEq(handler.verifyCalls(), 2);
     }
 
